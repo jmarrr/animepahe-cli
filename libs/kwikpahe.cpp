@@ -1,5 +1,6 @@
 #include <kwikpahe.hpp>
 #include <utils.hpp>
+#include <cookiejar.hpp>
 #include <cpr/cpr.h>
 #include <fmt/core.h>
 #include <fmt/color.h>
@@ -14,6 +15,7 @@
 #include <stdexcept>
 #include <iomanip>
 #include <cctype>
+#include <cstdlib>
 
 namespace AnimepaheCLI
 {
@@ -25,6 +27,83 @@ namespace AnimepaheCLI
     int placeholder = 24;              // Placeholder (unused)
 
     std::string baseAlphabet = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ+/";
+
+    static const char *KWIK_DEFAULT_USER_AGENT =
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36 Edg/138.0.0.0";
+
+    static std::string envOrEmpty(const char *name)
+    {
+        const char *v = std::getenv(name);
+        return (v && *v) ? std::string(v) : std::string();
+    }
+
+    /* Resolved once per process: env-var override wins, otherwise we read
+     * cf_clearance + matching UA out of the user's installed Chromium browser. */
+    struct KwikSession
+    {
+        std::string cookie;
+        std::string userAgent;
+        bool resolved = false;
+    };
+
+    static KwikSession &kwikSession()
+    {
+        static KwikSession s;
+        if (s.resolved)
+            return s;
+
+        std::string envCookie = envOrEmpty("KWIK_COOKIE");
+        std::string envUa = envOrEmpty("KWIK_UA");
+        if (!envCookie.empty())
+        {
+            s.cookie = envCookie;
+            s.userAgent = envUa.empty() ? KWIK_DEFAULT_USER_AGENT : envUa;
+            s.resolved = true;
+            return s;
+        }
+
+        BrowserCookies bc = loadKwikCookiesFromBrowser("kwik.cx");
+        if (bc.ok)
+        {
+            s.cookie = bc.cookieHeader;
+            s.userAgent = bc.userAgent.empty() ? KWIK_DEFAULT_USER_AGENT : bc.userAgent;
+            bool hasCfClearance = s.cookie.find("cf_clearance=") != std::string::npos;
+            fmt::print("\n * Browser cookies loaded ({} bytes, cf_clearance={})\n",
+                       s.cookie.size(), hasCfClearance ? "yes" : "no");
+        }
+        else
+        {
+            s.cookie.clear();
+            s.userAgent = envUa.empty() ? KWIK_DEFAULT_USER_AGENT : envUa;
+            fmt::print("\n * No browser cookies found — visit https://kwik.cx in Chrome/Edge first to seed cf_clearance, or set $env:KWIK_COOKIE\n");
+        }
+        s.resolved = true;
+        return s;
+    }
+
+    static cpr::Header kwikBrowserHeaders(const std::string &referer)
+    {
+        const KwikSession &k = kwikSession();
+        cpr::Header h{
+            {"user-agent", k.userAgent},
+            {"accept",
+             "text/html,application/xhtml+xml,application/xml;q=0.9,"
+             "image/avif,image/webp,image/apng,*/*;q=0.8"},
+            {"accept-language", "en-US,en;q=0.9"},
+            {"referer", referer},
+            {"sec-ch-ua-mobile", "?0"},
+            {"sec-ch-ua-platform", "\"Windows\""},
+            {"sec-fetch-dest", "document"},
+            {"sec-fetch-mode", "navigate"},
+            {"sec-fetch-site", "cross-site"},
+            {"sec-fetch-user", "?1"},
+            {"upgrade-insecure-requests", "1"},
+        };
+        if (!k.cookie.empty())
+            h["cookie"] = k.cookie;
+        return h;
+    }
 
     int KwikPahe::_0xe16c(const std::string &IS, int Iy, int ms)
     {
@@ -92,10 +171,16 @@ namespace AnimepaheCLI
 
     std::string KwikPahe::fetch_kwik_direct(const std::string &kwikLink, const std::string &token, const std::string &kwik_session)
     {
-        // Set up cookies
+        const KwikSession &ks = kwikSession();
+        std::string cookieValue = "kwik_session=" + kwik_session;
+        if (!ks.cookie.empty())
+        {
+            cookieValue = ks.cookie + "; " + cookieValue;
+        }
         cpr::Header headers = cpr::Header{
             {"referer", kwikLink},
-            {"cookie", "kwik_session=" + kwik_session},
+            {"cookie", cookieValue},
+            {"user-agent", ks.userAgent},
         };
         // Set up form data
         cpr::Payload data = cpr::Payload{{"_token", token}};
@@ -134,7 +219,9 @@ namespace AnimepaheCLI
             throw std::runtime_error(fmt::format("Kwik fetch failed: exceeded retry limit : {}", kwikLink));
         }
 
-        cpr::Response response = cpr::Get(cpr::Url{kwikLink});
+        cpr::Response response = cpr::Get(
+            cpr::Url{kwikLink},
+            kwikBrowserHeaders(kwikLink));
         if (response.status_code != 200)
         {
             throw std::runtime_error(fmt::format("Failed to Get Kwik from {}, StatusCode: {}", kwikLink, response.status_code));
@@ -202,7 +289,9 @@ namespace AnimepaheCLI
     std::map<std::string, std::string> KwikPahe::extract_kwik_link(const std::string &link)
     {
         fmt::print("\n\r * Extracting Kwik Link...");
-        cpr::Response response = cpr::Get(cpr::Url{link});
+        cpr::Response response = cpr::Get(
+            cpr::Url{link},
+            kwikBrowserHeaders(link));
         if (response.status_code != 200)
         {
             throw std::runtime_error(fmt::format("Failed to Get Kwik from {}, StatusCode: {}", link, response.status_code));
