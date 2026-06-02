@@ -1,6 +1,5 @@
 #include <kwikpahe.hpp>
 #include <utils.hpp>
-#include <cookiejar.hpp>
 #include <cpr/cpr.h>
 #include <fmt/core.h>
 #include <fmt/color.h>
@@ -38,8 +37,10 @@ namespace AnimepaheCLI
         return (v && *v) ? std::string(v) : std::string();
     }
 
-    /* Resolved once per process: env-var override wins, otherwise we read
-     * cf_clearance + matching UA out of the user's installed Chromium browser. */
+    /* Resolved once per process. Source: KWIK_COOKIE and KWIK_UA env vars,
+     * which the user copies out of Chrome's devtools after visiting kwik.cx.
+     * If unset, requests go out cookieless and kwik.cx will 403 — surface
+     * that with a hint instead of silently failing. */
     struct KwikSession
     {
         std::string cookie;
@@ -53,36 +54,21 @@ namespace AnimepaheCLI
         if (s.resolved)
             return s;
 
-        std::string envCookie = envOrEmpty("KWIK_COOKIE");
+        s.cookie = envOrEmpty("KWIK_COOKIE");
         std::string envUa = envOrEmpty("KWIK_UA");
-        if (!envCookie.empty())
-        {
-            s.cookie = envCookie;
-            s.userAgent = envUa.empty() ? KWIK_DEFAULT_USER_AGENT : envUa;
-            s.resolved = true;
-            return s;
-        }
-
-        BrowserCookies bc = loadKwikCookiesFromBrowser("kwik.cx");
-        if (bc.ok)
-        {
-            s.cookie = bc.cookieHeader;
-            s.userAgent = bc.userAgent.empty() ? KWIK_DEFAULT_USER_AGENT : bc.userAgent;
-            bool hasCfClearance = s.cookie.find("cf_clearance=") != std::string::npos;
-            fmt::print("\n * Browser cookies loaded ({} bytes, cf_clearance={})\n",
-                       s.cookie.size(), hasCfClearance ? "yes" : "no");
-        }
-        else
-        {
-            s.cookie.clear();
-            s.userAgent = envUa.empty() ? KWIK_DEFAULT_USER_AGENT : envUa;
-            fmt::print("\n * No browser cookies found — visit https://kwik.cx in Chrome/Edge first to seed cf_clearance, or set $env:KWIK_COOKIE\n");
-        }
+        s.userAgent = envUa.empty() ? KWIK_DEFAULT_USER_AGENT : envUa;
         s.resolved = true;
+
+        if (s.cookie.empty())
+        {
+            fmt::print(fmt::fg(fmt::color::yellow),
+                "\n * KWIK_COOKIE not set — kwik.cx will 403. "
+                "See README \"Bypass Cloudflare on kwik.cx\".\n");
+        }
         return s;
     }
 
-    static cpr::Header kwikBrowserHeaders(const std::string &referer)
+    static cpr::Header kwikBrowserHeaders(const std::string &targetUrl)
     {
         const KwikSession &k = kwikSession();
         cpr::Header h{
@@ -91,7 +77,7 @@ namespace AnimepaheCLI
              "text/html,application/xhtml+xml,application/xml;q=0.9,"
              "image/avif,image/webp,image/apng,*/*;q=0.8"},
             {"accept-language", "en-US,en;q=0.9"},
-            {"referer", referer},
+            {"referer", targetUrl},
             {"sec-ch-ua-mobile", "?0"},
             {"sec-ch-ua-platform", "\"Windows\""},
             {"sec-fetch-dest", "document"},
@@ -100,7 +86,9 @@ namespace AnimepaheCLI
             {"sec-fetch-user", "?1"},
             {"upgrade-insecure-requests", "1"},
         };
-        if (!k.cookie.empty())
+        /* Only attach the kwik cf_clearance to kwik domains. pahe.win is on a
+         * different Cloudflare zone and rejects unbound cookies with 503. */
+        if (!k.cookie.empty() && targetUrl.find("://kwik.") != std::string::npos)
             h["cookie"] = k.cookie;
         return h;
     }

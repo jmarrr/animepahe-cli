@@ -287,6 +287,36 @@ animepahe-cli-beta.exe -l "https://animepahe.com/anime/dcb2b21f-a70d-84f7-fbab-5
 - Large batch downloads may consume significant system resources
 - Update feature requires internet connection and appropriate permissions
 - Some edge cases may cause unexpected behavior (beta version)
+- **kwik.cx requires `cf_clearance` (see below)** — without it, every download fails with `Failed to Get Kwik ... StatusCode: 403`.
+
+## 🔑 Bypassing Cloudflare on kwik.cx
+
+The CLI cannot solve Cloudflare's interactive JS challenge that protects `kwik.cx` (no HTTP client can — it needs a real browser). The workaround is to reuse the cookie your own browser already obtained when it visited kwik.cx.
+
+**One-time per ~30 minutes (the cookie's lifetime):**
+
+1. Open <https://kwik.cx> in Chrome/Edge. The page auto-passes the "Just a moment…" challenge.
+2. DevTools → **Application** → **Cookies** → `https://kwik.cx`. Copy the value of the `cf_clearance` row.
+3. DevTools → **Console** → run `navigator.userAgent` and copy the string.
+4. Set both as environment variables before running the CLI:
+
+   ```powershell
+   $env:KWIK_COOKIE = "cf_clearance=<paste value>"
+   $env:KWIK_UA     = "<paste userAgent>"
+   ./animepahe-cli-beta -l "https://animepahe.<tld>/anime/<uuid>" -e all
+   ```
+
+   On macOS / Linux:
+
+   ```sh
+   export KWIK_COOKIE="cf_clearance=<paste value>"
+   export KWIK_UA="<paste userAgent>"
+   ./animepahe-cli-beta -l "https://animepahe.<tld>/anime/<uuid>" -e all
+   ```
+
+When kwik 403s mid-run, the cookie has expired — reload kwik.cx in the browser, copy the new value, retry.
+
+Yes it's hassle. A no-cookie fix would need either a paid Cloudflare Workers Browser Rendering plan or a hosted browser-automation service; neither felt worth the cost for a personal tool. PRs welcome.
 
 ## 🚧 Upcoming Features
 
