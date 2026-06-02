@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "animepahe-cli cookie helper",
+  "version": "1.0.0",
+  "description": "Keeps cf_clearance fresh for animepahe-cli so the CLI never 403s on kwik.cx.",
+  "permissions": ["cookies", "downloads", "alarms", "tabs"],
+  "host_permissions": ["https://kwik.cx/*"],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "animepahe-cli cookie helper"
+  }
+}

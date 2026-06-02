@@ -4,10 +4,14 @@
 #include <fmt/core.h>
 #include <fmt/color.h>
 #include <re2/re2.h>
+#include <nlohmann/json.hpp>
 #include <string>
 /* DECODER LIBS */
+#include <chrono>
 #include <iostream>
 #include <cmath>
+#include <filesystem>
+#include <fstream>
 #include <vector>
 #include <algorithm>
 #include <sstream>
@@ -37,10 +41,6 @@ namespace AnimepaheCLI
         return (v && *v) ? std::string(v) : std::string();
     }
 
-    /* Resolved once per process. Source: KWIK_COOKIE and KWIK_UA env vars,
-     * which the user copies out of Chrome's devtools after visiting kwik.cx.
-     * If unset, requests go out cookieless and kwik.cx will 403 — surface
-     * that with a hint instead of silently failing. */
     struct KwikSession
     {
         std::string cookie;
@@ -48,23 +48,97 @@ namespace AnimepaheCLI
         bool resolved = false;
     };
 
+    /* Drop site of the browser extension (extension/background.js).
+     * The extension keeps this file fresh; CLI just reads it. */
+    static std::filesystem::path helperCookieFilePath()
+    {
+        std::string home;
+#ifdef _WIN32
+        home = envOrEmpty("USERPROFILE");
+        if (home.empty())
+            return {};
+        return std::filesystem::path(home) / "Downloads" / "animepahe-cli" / "cookie.json";
+#else
+        home = envOrEmpty("HOME");
+        if (home.empty())
+            return {};
+        return std::filesystem::path(home) / "Downloads" / "animepahe-cli" / "cookie.json";
+#endif
+    }
+
+    static bool loadFromHelperFile(KwikSession &s)
+    {
+        std::filesystem::path path = helperCookieFilePath();
+        std::error_code ec;
+        if (path.empty() || !std::filesystem::exists(path, ec))
+            return false;
+
+        std::ifstream f(path);
+        if (!f)
+            return false;
+
+        try
+        {
+            nlohmann::json j;
+            f >> j;
+            std::string cookie = j.value("cookie", "");
+            std::string ua = j.value("userAgent", "");
+            if (cookie.empty())
+                return false;
+
+            /* Skip if the extension wrote a stale cookie — Chrome's stored
+             * expirationDate is authoritative; if it's already past, the cookie
+             * won't satisfy Cloudflare. */
+            double expiresAtMs = j.value("expiresAtMs", 0.0);
+            if (expiresAtMs > 0)
+            {
+                auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 std::chrono::system_clock::now().time_since_epoch())
+                                 .count();
+                if (expiresAtMs <= static_cast<double>(nowMs))
+                    return false;
+            }
+
+            s.cookie = cookie;
+            if (!ua.empty())
+                s.userAgent = ua;
+            return true;
+        }
+        catch (...)
+        {
+            return false;
+        }
+    }
+
+    /* Resolved once per process.
+     *   1. KWIK_COOKIE / KWIK_UA env vars (manual override).
+     *   2. cookie.json written by the companion Chrome extension.
+     *   3. Nothing — print a hint and let kwik.cx 403 surface the problem. */
     static KwikSession &kwikSession()
     {
         static KwikSession s;
         if (s.resolved)
             return s;
 
-        s.cookie = envOrEmpty("KWIK_COOKIE");
         std::string envUa = envOrEmpty("KWIK_UA");
         s.userAgent = envUa.empty() ? KWIK_DEFAULT_USER_AGENT : envUa;
-        s.resolved = true;
-
-        if (s.cookie.empty())
+        s.cookie = envOrEmpty("KWIK_COOKIE");
+        if (!s.cookie.empty())
         {
-            fmt::print(fmt::fg(fmt::color::yellow),
-                "\n * KWIK_COOKIE not set — kwik.cx will 403. "
-                "See README \"Bypass Cloudflare on kwik.cx\".\n");
+            s.resolved = true;
+            return s;
         }
+
+        if (loadFromHelperFile(s))
+        {
+            s.resolved = true;
+            return s;
+        }
+
+        s.resolved = true;
+        fmt::print(fmt::fg(fmt::color::yellow),
+            "\n * No kwik cookie available — install the Chrome extension at "
+            "extension/ or set $env:KWIK_COOKIE. kwik.cx will 403 otherwise.\n");
         return s;
     }
 

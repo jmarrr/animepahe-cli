@@ -291,9 +291,26 @@ animepahe-cli-beta.exe -l "https://animepahe.com/anime/dcb2b21f-a70d-84f7-fbab-5
 
 ## 🔑 Bypassing Cloudflare on kwik.cx
 
-The CLI cannot solve Cloudflare's interactive JS challenge that protects `kwik.cx` (no HTTP client can — it needs a real browser). The workaround is to reuse the cookie your own browser already obtained when it visited kwik.cx.
+The CLI cannot solve Cloudflare's interactive JS challenge that protects `kwik.cx` (no HTTP client can — it needs a real browser). Instead it reads the `cf_clearance` cookie your own browser already obtained when it visited kwik.cx.
 
-**One-time per ~30 minutes (the cookie's lifetime):**
+You have **two options**, in order of preference:
+
+### Option A — Install the Chrome extension (recommended, hands-off)
+
+Tiny unpacked extension in `extension/` that auto-syncs the cookie from Chrome (or Edge/Brave) to disk. Install once and forget — every 25 minutes it silently re-visits kwik.cx so Cloudflare refreshes the cookie before it ages out, and the CLI reads the latest value off disk.
+
+```text
+1. chrome://extensions (or edge://extensions, brave://extensions)
+2. Enable Developer mode (top right)
+3. Click "Load unpacked" → select the extension/ folder
+4. Visit https://kwik.cx once to seed the first cookie
+```
+
+Detailed instructions in [`extension/README.md`](extension/README.md). After install, just run the CLI normally — no env vars required.
+
+### Option B — Manual env vars (no install)
+
+If you don't want to install the extension, refresh by hand every ~30 minutes:
 
 1. Open <https://kwik.cx> in Chrome/Edge. The page auto-passes the "Just a moment…" challenge.
 2. DevTools → **Application** → **Cookies** → `https://kwik.cx`. Copy the value of the `cf_clearance` row.
@@ -314,9 +331,15 @@ The CLI cannot solve Cloudflare's interactive JS challenge that protects `kwik.c
    ./animepahe-cli-beta -l "https://animepahe.<tld>/anime/<uuid>" -e all
    ```
 
-When kwik 403s mid-run, the cookie has expired — reload kwik.cx in the browser, copy the new value, retry.
+When kwik 403s mid-run, the cookie has expired — reload kwik.cx, copy the new value, retry.
 
-Yes it's hassle. A no-cookie fix would need either a paid Cloudflare Workers Browser Rendering plan or a hosted browser-automation service; neither felt worth the cost for a personal tool. PRs welcome.
+### Lookup order
+
+The CLI tries, in order:
+
+1. `KWIK_COOKIE` / `KWIK_UA` environment variables
+2. `~/Downloads/animepahe-cli/cookie.json` (written by the extension)
+3. Nothing — prints a yellow hint and lets kwik 403 surface the problem.
 
 ## 🚧 Upcoming Features
 
