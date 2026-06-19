@@ -1,17 +1,14 @@
 #include <kwikpahe.hpp>
 #include <utils.hpp>
+#include <cookiehelper.hpp>
 #include <cpr/cpr.h>
 #include <fmt/core.h>
 #include <fmt/color.h>
 #include <re2/re2.h>
-#include <nlohmann/json.hpp>
 #include <string>
 /* DECODER LIBS */
-#include <chrono>
 #include <iostream>
 #include <cmath>
-#include <filesystem>
-#include <fstream>
 #include <vector>
 #include <algorithm>
 #include <sstream>
@@ -31,122 +28,10 @@ namespace AnimepaheCLI
 
     std::string baseAlphabet = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ+/";
 
-    static const char *KWIK_DEFAULT_USER_AGENT =
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36 Edg/138.0.0.0";
-
-    static std::string envOrEmpty(const char *name)
-    {
-        const char *v = std::getenv(name);
-        return (v && *v) ? std::string(v) : std::string();
-    }
-
-    struct KwikSession
-    {
-        std::string cookie;
-        std::string userAgent;
-        bool resolved = false;
-    };
-
-    /* Drop site of the browser extension (extension/background.js).
-     * The extension keeps this file fresh; CLI just reads it. */
-    static std::filesystem::path helperCookieFilePath()
-    {
-        std::string home;
-#ifdef _WIN32
-        home = envOrEmpty("USERPROFILE");
-        if (home.empty())
-            return {};
-        return std::filesystem::path(home) / "Downloads" / "animepahe-cli" / "cookie.json";
-#else
-        home = envOrEmpty("HOME");
-        if (home.empty())
-            return {};
-        return std::filesystem::path(home) / "Downloads" / "animepahe-cli" / "cookie.json";
-#endif
-    }
-
-    static bool loadFromHelperFile(KwikSession &s)
-    {
-        std::filesystem::path path = helperCookieFilePath();
-        std::error_code ec;
-        if (path.empty() || !std::filesystem::exists(path, ec))
-            return false;
-
-        std::ifstream f(path);
-        if (!f)
-            return false;
-
-        try
-        {
-            nlohmann::json j;
-            f >> j;
-            std::string cookie = j.value("cookie", "");
-            std::string ua = j.value("userAgent", "");
-            if (cookie.empty())
-                return false;
-
-            /* Skip if the extension wrote a stale cookie — Chrome's stored
-             * expirationDate is authoritative; if it's already past, the cookie
-             * won't satisfy Cloudflare. */
-            double expiresAtMs = j.value("expiresAtMs", 0.0);
-            if (expiresAtMs > 0)
-            {
-                auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                 std::chrono::system_clock::now().time_since_epoch())
-                                 .count();
-                if (expiresAtMs <= static_cast<double>(nowMs))
-                    return false;
-            }
-
-            s.cookie = cookie;
-            if (!ua.empty())
-                s.userAgent = ua;
-            return true;
-        }
-        catch (...)
-        {
-            return false;
-        }
-    }
-
-    /* Resolved once per process.
-     *   1. KWIK_COOKIE / KWIK_UA env vars (manual override).
-     *   2. cookie.json written by the companion Chrome extension.
-     *   3. Nothing — print a hint and let kwik.cx 403 surface the problem. */
-    static KwikSession &kwikSession()
-    {
-        static KwikSession s;
-        if (s.resolved)
-            return s;
-
-        std::string envUa = envOrEmpty("KWIK_UA");
-        s.userAgent = envUa.empty() ? KWIK_DEFAULT_USER_AGENT : envUa;
-        s.cookie = envOrEmpty("KWIK_COOKIE");
-        if (!s.cookie.empty())
-        {
-            s.resolved = true;
-            return s;
-        }
-
-        if (loadFromHelperFile(s))
-        {
-            s.resolved = true;
-            return s;
-        }
-
-        s.resolved = true;
-        fmt::print(fmt::fg(fmt::color::yellow),
-            "\n * No kwik cookie available — install the Chrome extension at "
-            "extension/ or set $env:KWIK_COOKIE. kwik.cx will 403 otherwise.\n");
-        return s;
-    }
-
     static cpr::Header kwikBrowserHeaders(const std::string &targetUrl)
     {
-        const KwikSession &k = kwikSession();
         cpr::Header h{
-            {"user-agent", k.userAgent},
+            {"user-agent", preferredUserAgent()},
             {"accept",
              "text/html,application/xhtml+xml,application/xml;q=0.9,"
              "image/avif,image/webp,image/apng,*/*;q=0.8"},
@@ -160,10 +45,9 @@ namespace AnimepaheCLI
             {"sec-fetch-user", "?1"},
             {"upgrade-insecure-requests", "1"},
         };
-        /* Only attach the kwik cf_clearance to kwik domains. pahe.win is on a
-         * different Cloudflare zone and rejects unbound cookies with 503. */
-        if (!k.cookie.empty() && targetUrl.find("://kwik.") != std::string::npos)
-            h["cookie"] = k.cookie;
+        std::string cookie = cookieForUrl(targetUrl);
+        if (!cookie.empty())
+            h["cookie"] = cookie;
         return h;
     }
 
@@ -233,16 +117,14 @@ namespace AnimepaheCLI
 
     std::string KwikPahe::fetch_kwik_direct(const std::string &kwikLink, const std::string &token, const std::string &kwik_session)
     {
-        const KwikSession &ks = kwikSession();
         std::string cookieValue = "kwik_session=" + kwik_session;
-        if (!ks.cookie.empty())
-        {
-            cookieValue = ks.cookie + "; " + cookieValue;
-        }
+        std::string cfCookie = cookieForUrl(kwikLink);
+        if (!cfCookie.empty())
+            cookieValue = cfCookie + "; " + cookieValue;
         cpr::Header headers = cpr::Header{
             {"referer", kwikLink},
             {"cookie", cookieValue},
-            {"user-agent", ks.userAgent},
+            {"user-agent", preferredUserAgent()},
         };
         // Set up form data
         cpr::Payload data = cpr::Payload{{"_token", token}};

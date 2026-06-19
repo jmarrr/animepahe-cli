@@ -1,17 +1,24 @@
 # animepahe-cli cookie helper (Chrome extension)
 
-A tiny unpacked extension that keeps `cf_clearance` for `kwik.cx` fresh and
-hands it off to `animepahe-cli` so you never set env vars again.
+A tiny unpacked extension that keeps `cf_clearance` for **animepahe.\*** and
+**kwik.cx** fresh and hands them off to `animepahe-cli` so you never set env
+vars again.
 
 ## How it works
 
-1. Reads `cf_clearance` + `navigator.userAgent` from your running Chrome.
-2. Writes them to `~/Downloads/animepahe-cli/cookie.json` (the CLI looks there).
-3. Refreshes every 5 minutes, and silently re-visits `kwik.cx` every 25 minutes
-   so Cloudflare hands out a new clearance before the old one ages out.
+1. Watches cookies on every animepahe TLD it knows about (`.com`, `.org`,
+   `.ru`, `.si`, `.pw`, `.tv`), plus `pahe.win` and `kwik.cx`.
+2. Reads `cf_clearance` (and `__cf_bm` / `__cflb` when present) + your
+   `navigator.userAgent`, writes them as a `cookiesByHost` map to
+   `~/Downloads/animepahe-cli/cookie.json`.
+3. Refreshes immediately on every `chrome.cookies.onChanged` event, plus a
+   5-minute fallback alarm.
+4. Every 25 minutes the extension silently re-visits each known site in a
+   small off-screen popup so Cloudflare hands out a new clearance before the
+   old one ages out — keeps the file warm without you having to remember.
 
-The CLI's lookup order is `KWIK_COOKIE` env var → this file → nothing. The
-extension doesn't replace the env-var path — it just removes the need for it.
+The CLI's lookup order, per request host, is `KWIK_COOKIE` env var (kwik
+only) → this file's `cookiesByHost` map → nothing.
 
 ## Install
 
@@ -19,9 +26,9 @@ extension doesn't replace the env-var path — it just removes the need for it.
 2. Toggle **Developer mode** on (top right).
 3. Click **Load unpacked**.
 4. Pick the `extension/` folder from this repo.
-5. Visit https://kwik.cx once so Cloudflare drops a `cf_clearance` cookie.
-   The extension picks it up on cookie change, writes the file, and then
-   keeps it fresh on its own.
+5. Visit https://animepahe.pw (or whichever TLD is currently live) **and**
+   https://kwik.cx once. The extension picks up both `cf_clearance` cookies
+   on the spot, writes the file, and keeps both fresh on its own from then on.
 
 That's it. Run the CLI normally — no env vars.
 
@@ -37,9 +44,11 @@ You should see something like:
 
 ```json
 {
-  "cookie": "cf_clearance=...",
+  "cookiesByHost": {
+    "kwik.cx": "cf_clearance=...; __cf_bm=...",
+    "animepahe.pw": "cf_clearance=..."
+  },
   "userAgent": "Mozilla/5.0 ...",
-  "expiresAtMs": 1780401926000,
   "updatedAtMs": 1778401926123,
   "source": "animepahe-cli cookie helper"
 }

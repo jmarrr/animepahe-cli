@@ -289,28 +289,28 @@ animepahe-cli-beta.exe -l "https://animepahe.com/anime/dcb2b21f-a70d-84f7-fbab-5
 - Some edge cases may cause unexpected behavior (beta version)
 - **kwik.cx requires `cf_clearance` (see below)** — without it, every download fails with `Failed to Get Kwik ... StatusCode: 403`.
 
-## 🔑 Bypassing Cloudflare on kwik.cx
+## 🔑 Bypassing Cloudflare on animepahe.\* and kwik.cx
 
-The CLI cannot solve Cloudflare's interactive JS challenge that protects `kwik.cx` (no HTTP client can — it needs a real browser). Instead it reads the `cf_clearance` cookie your own browser already obtained when it visited kwik.cx.
+Both `animepahe.<tld>` and `kwik.cx` now sit behind Cloudflare's interactive JS challenge. No HTTP client (libcurl, curl-impersonate, yt-dlp, …) can solve it — it requires a real browser. The CLI works around this by reading the `cf_clearance` cookie your own browser already obtained when it visited those sites.
 
 You have **two options**, in order of preference:
 
 ### Option A — Install the Chrome extension (recommended, hands-off)
 
-Tiny unpacked extension in `extension/` that auto-syncs the cookie from Chrome (or Edge/Brave) to disk. Install once and forget — every 25 minutes it silently re-visits kwik.cx so Cloudflare refreshes the cookie before it ages out, and the CLI reads the latest value off disk.
+Tiny unpacked extension in `extension/` that auto-syncs `cf_clearance` from Chrome (or Edge/Brave) to disk for **both** animepahe and kwik. Install once and forget — every 25 minutes it silently re-visits each known site so Cloudflare refreshes the cookies before they age out, and the CLI reads the latest values off disk.
 
 ```text
 1. chrome://extensions (or edge://extensions, brave://extensions)
 2. Enable Developer mode (top right)
 3. Click "Load unpacked" → select the extension/ folder
-4. Visit https://kwik.cx once to seed the first cookie
+4. Visit https://animepahe.pw and https://kwik.cx once each to seed
 ```
 
 Detailed instructions in [`extension/README.md`](extension/README.md). After install, just run the CLI normally — no env vars required.
 
-### Option B — Manual env vars (no install)
+### Option B — Manual env vars (kwik only, no install)
 
-If you don't want to install the extension, refresh by hand every ~30 minutes:
+Doesn't cover animepahe.\* — Option A is required if your animepahe TLD is also being challenged. For kwik only:
 
 1. Open <https://kwik.cx> in Chrome/Edge. The page auto-passes the "Just a moment…" challenge.
 2. DevTools → **Application** → **Cookies** → `https://kwik.cx`. Copy the value of the `cf_clearance` row.
@@ -323,23 +323,15 @@ If you don't want to install the extension, refresh by hand every ~30 minutes:
    ./animepahe-cli-beta -l "https://animepahe.<tld>/anime/<uuid>" -e all
    ```
 
-   On macOS / Linux:
-
-   ```sh
-   export KWIK_COOKIE="cf_clearance=<paste value>"
-   export KWIK_UA="<paste userAgent>"
-   ./animepahe-cli-beta -l "https://animepahe.<tld>/anime/<uuid>" -e all
-   ```
-
 When kwik 403s mid-run, the cookie has expired — reload kwik.cx, copy the new value, retry.
 
 ### Lookup order
 
-The CLI tries, in order:
+The CLI tries, per request host:
 
-1. `KWIK_COOKIE` / `KWIK_UA` environment variables
-2. `~/Downloads/animepahe-cli/cookie.json` (written by the extension)
-3. Nothing — prints a yellow hint and lets kwik 403 surface the problem.
+1. `KWIK_COOKIE` / `KWIK_UA` env vars (kwik hosts only)
+2. `~/Downloads/animepahe-cli/cookie.json` `cookiesByHost` map — exact host match, then suffix match (so `vault-07.kwik.cx` picks up the `kwik.cx` entry).
+3. No cookie attached. Request goes out, gets 403 if the host is gated.
 
 ## 🚧 Upcoming Features
 

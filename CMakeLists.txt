@@ -72,6 +72,7 @@ set(SRC_FILES
   libs/utils.cpp
   libs/animepahe.cpp
   libs/kwikpahe.cpp
+  libs/cookiehelper.cpp
   libs/streamkey.cpp
   libs/downloader.cpp
   libs/ziputils.cpp

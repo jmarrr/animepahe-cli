@@ -1,56 +1,112 @@
 /**
- * Reads cf_clearance + UA from the user's running Chrome and writes it to
- * Downloads/animepahe-cli/cookie.json, where animepahe-cli reads it from.
+ * Reads cf_clearance from the user's Chrome for every domain animepahe-cli
+ * needs to talk to (animepahe.*, pahe.win, kwik.cx) and writes them as one
+ * JSON blob to Downloads/animepahe-cli/cookie.json. The CLI looks the cookie
+ * up by request host at fetch time.
  *
  * Triggers:
  *   - On install / browser startup
- *   - Every 5 minutes via chrome.alarms
- *   - Whenever kwik.cx sets/updates the cf_clearance cookie
- *
- * Approach: use chrome.downloads with a data: URL + conflictAction:"overwrite",
- * then erase the resulting download record so the user's history stays clean.
- * Native messaging would be cleaner but requires a registered native host;
- * downloads-based file drop ships as a pure-JS extension with no installer.
+ *   - chrome.cookies.onChanged for any watched host (instant sync)
+ *   - 5-min chrome.alarms (catch-all)
+ *   - 25-min silent visit to keep the cookie warm
  */
 
-const KWIK_URL = "https://kwik.cx/";
-const COOKIE_NAME = "cf_clearance";
+const HOSTS = [
+  "kwik.cx",
+  "pahe.win",
+  "animepahe.com",
+  "animepahe.org",
+  "animepahe.ru",
+  "animepahe.si",
+  "animepahe.pw",
+  "animepahe.tv",
+];
+
+/* Which sites are worth periodically re-visiting to refresh cf_clearance.
+ * animepahe rotates TLDs, so we visit every known one — Cloudflare ignores
+ * the visits to whichever TLDs aren't live. */
+const REFRESH_VISIT_HOSTS = [
+  "https://kwik.cx/",
+  "https://animepahe.com/",
+  "https://animepahe.org/",
+  "https://animepahe.ru/",
+  "https://animepahe.si/",
+  "https://animepahe.pw/",
+  "https://animepahe.tv/",
+];
+
 const OUT_RELATIVE_PATH = "animepahe-cli/cookie.json";
 const REFRESH_PERIOD_MIN = 5;
-const REFRESH_TAB_VISIT_MIN = 25; // re-visit kwik.cx silently before cookie ages out
+const SILENT_VISIT_PERIOD_MIN = 25;
 
-async function getKwikClearance() {
-  return chrome.cookies.get({ url: KWIK_URL, name: COOKIE_NAME });
+const INTERESTING_COOKIE_NAMES = new Set([
+  "cf_clearance",
+  "__cf_bm",
+  "__cflb",
+]);
+
+function hostKeyFromDomain(domain) {
+  /* Chrome stores domain cookies with a leading dot ".kwik.cx" — strip it. */
+  return domain.startsWith(".") ? domain.slice(1) : domain;
 }
 
-async function writeCookieFile(cookie) {
-  const payload = {
-    cookie: `${COOKIE_NAME}=${cookie.value}`,
-    userAgent: self.navigator.userAgent,
-    expiresAtMs: cookie.expirationDate
-      ? Math.round(cookie.expirationDate * 1000)
-      : null,
-    updatedAtMs: Date.now(),
-    source: "animepahe-cli cookie helper",
-  };
+async function getAllCookiesForHost(host) {
+  /* chrome.cookies.getAll only returns unpartitioned cookies unless you also
+   * pass partitionKey. Cloudflare now sets cf_clearance as a Partitioned
+   * cookie (CHIPS), keyed to the site's own top-level origin. We have to ask
+   * for both unpartitioned + the host's own partition explicitly. */
+  const unpart = await chrome.cookies.getAll({ domain: host });
+  let part = [];
+  try {
+    part = await chrome.cookies.getAll({
+      domain: host,
+      partitionKey: { topLevelSite: `https://${host}` },
+    });
+  } catch (e) {
+    /* Older Chrome (<119) doesn't know partitionKey; skip silently. */
+  }
+  /* Dedupe by name — keep the partitioned variant when present, since
+   * Cloudflare's current cf_clearance lives there. */
+  const byName = new Map();
+  for (const c of unpart) byName.set(c.name, c);
+  for (const c of part) byName.set(c.name, c);
+  return Array.from(byName.values());
+}
 
-  /* base64-encode JSON into a data: URL — chrome.downloads.download only
-   * accepts http/https/data, not raw text. */
+async function collectCookiesByHost() {
+  const byHost = {};
+  for (const host of HOSTS) {
+    let cookies;
+    try {
+      cookies = await getAllCookiesForHost(host);
+    } catch (e) {
+      console.error(`[helper] getAll(${host}) failed:`, e);
+      continue;
+    }
+    if (!cookies || !cookies.length) continue;
+
+    const pairs = cookies
+      .filter((c) => INTERESTING_COOKIE_NAMES.has(c.name))
+      .map((c) => `${c.name}=${c.value}`);
+    if (pairs.length) {
+      byHost[host] = pairs.join("; ");
+    }
+  }
+  return byHost;
+}
+
+async function writePayload(payload) {
   const json = JSON.stringify(payload, null, 2);
   const b64 = btoa(unescape(encodeURIComponent(json)));
   const dataUrl = `data:application/json;base64,${b64}`;
-
-  const id = await chrome.downloads.download({
+  return chrome.downloads.download({
     url: dataUrl,
     filename: OUT_RELATIVE_PATH,
     conflictAction: "overwrite",
     saveAs: false,
   });
-  return id;
 }
 
-/* Erase the download record once it finishes so the user's history doesn't
- * fill up with cookie.json entries. */
 chrome.downloads.onChanged.addListener((delta) => {
   if (delta.state && delta.state.current === "complete") {
     chrome.downloads.search({ id: delta.id }, (results) => {
@@ -67,13 +123,22 @@ chrome.downloads.onChanged.addListener((delta) => {
 
 async function refresh() {
   try {
-    const cookie = await getKwikClearance();
-    if (!cookie || !cookie.value) {
-      console.log("[helper] no cf_clearance present — open kwik.cx once");
+    const byHost = await collectCookiesByHost();
+    const knownHosts = Object.keys(byHost);
+    if (knownHosts.length === 0) {
+      console.log(
+        "[helper] no cf_clearance for any watched host yet — visit animepahe and kwik.cx once"
+      );
       return false;
     }
-    await writeCookieFile(cookie);
-    console.log("[helper] wrote cookie file (expires", cookie.expirationDate, ")");
+    const payload = {
+      cookiesByHost: byHost,
+      userAgent: self.navigator.userAgent,
+      updatedAtMs: Date.now(),
+      source: "animepahe-cli cookie helper",
+    };
+    await writePayload(payload);
+    console.log("[helper] wrote cookie file for hosts:", knownHosts.join(", "));
     return true;
   } catch (e) {
     console.error("[helper] refresh failed:", e);
@@ -81,30 +146,28 @@ async function refresh() {
   }
 }
 
-/* Silently visit kwik.cx so Cloudflare re-issues cf_clearance before the
- * current one ages out. Opens a tiny off-screen popup window that's gone
- * within a few seconds. */
+/* Open each host in a minimized popup so Cloudflare re-issues cf_clearance
+ * without stealing focus. (Off-screen positioning is rejected by Chrome —
+ * windows must be at least 50% on a visible monitor — so we minimize instead.) */
 async function silentVisit() {
-  let win;
-  try {
-    win = await chrome.windows.create({
-      url: KWIK_URL,
-      type: "popup",
-      width: 320,
-      height: 200,
-      left: -32000,
-      top: -32000,
-      focused: false,
-    });
-    /* Give Cloudflare time to issue the challenge + Chrome to write Set-Cookie. */
-    await new Promise((r) => setTimeout(r, 7000));
-  } catch (e) {
-    console.error("[helper] silentVisit failed:", e);
-  } finally {
-    if (win && win.id != null) {
-      try {
-        await chrome.windows.remove(win.id);
-      } catch {}
+  for (const url of REFRESH_VISIT_HOSTS) {
+    let win;
+    try {
+      win = await chrome.windows.create({
+        url,
+        type: "popup",
+        state: "minimized",
+        focused: false,
+      });
+      await new Promise((r) => setTimeout(r, 5000));
+    } catch (e) {
+      console.error(`[helper] silentVisit(${url}) failed:`, e);
+    } finally {
+      if (win && win.id != null) {
+        try {
+          await chrome.windows.remove(win.id);
+        } catch {}
+      }
     }
   }
   await refresh();
@@ -113,7 +176,7 @@ async function silentVisit() {
 chrome.runtime.onInstalled.addListener(() => {
   chrome.alarms.create("refresh", { periodInMinutes: REFRESH_PERIOD_MIN });
   chrome.alarms.create("silent-visit", {
-    periodInMinutes: REFRESH_TAB_VISIT_MIN,
+    periodInMinutes: SILENT_VISIT_PERIOD_MIN,
   });
   refresh();
 });
@@ -127,20 +190,15 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === "silent-visit") silentVisit();
 });
 
-/* Pick up cookie changes the moment Chrome receives a fresh Set-Cookie from
- * kwik.cx — keeps the file in sync without waiting for the 5-min alarm. */
 chrome.cookies.onChanged.addListener((change) => {
-  if (
-    !change.removed &&
-    change.cookie &&
-    change.cookie.name === COOKIE_NAME &&
-    change.cookie.domain.endsWith("kwik.cx")
-  ) {
+  if (change.removed) return;
+  if (!INTERESTING_COOKIE_NAMES.has(change.cookie.name)) return;
+  const host = hostKeyFromDomain(change.cookie.domain);
+  if (HOSTS.some((h) => host === h || host.endsWith("." + h) || h.endsWith("." + host))) {
     refresh();
   }
 });
 
-/* Click the toolbar icon to force a refresh + visit on demand. */
 chrome.action.onClicked.addListener(() => {
   silentVisit();
 });
